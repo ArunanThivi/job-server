@@ -1,0 +1,75 @@
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-server
+spec:
+  selector:
+    matchLabels:
+      app: go-server
+  template:
+    metadata:
+      labels:
+        app: go-server
+    spec:
+      serviceAccountName: job-server-sa
+      containers:
+        - name: server
+          image: go-server:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5000
+---
+# Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: go-server
+spec:
+  type: NodePort
+  selector:
+    app: go-server
+  ports:
+    - port: 5000
+      targetPort: 5000
+      protocol: TCP
+      nodePort: 30080
+---
+# Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: job-server-sa
+  namespace: default
+---
+# Role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: job-server-role
+  namespace: default
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "get"]
+---
+# Role Binding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: job-server-binding
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: job-server-sa
+    namespace: default
+roleRef:
+  kind: Role
+  name: job-server-role
+  apiGroup: rbac.authorization.k8s.io
