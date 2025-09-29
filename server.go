@@ -31,6 +31,9 @@ RUN chmod +x /autograder/run_autograder
 RUN chmod +x /autograder/source/setup.sh
 RUN bash /autograder/source/setup.sh
 `
+const BUILDKIT_CONFIG = `[registry.\"registry.default.svc.cluster.local:5000\"]
+  http=true
+`
 
 func main() {
 	const PORT = 5000
@@ -171,7 +174,9 @@ func main() {
 								Image:           "alpine/git",
 								ImagePullPolicy: corev1.PullIfNotPresent,
 								Command:         []string{"/bin/sh", "-c"},
-								Args:            []string{fmt.Sprintf("echo \"%s\" | base64 -d > /tmp/files.zip && unzip /tmp/files.zip -d /workspace && echo \"%s\" > /workspace/Dockerfile", encodedZipData, DOCKERFILE)},
+								Args: []string{
+									fmt.Sprintf("echo \"%s\" | base64 -d > /tmp/files.zip && unzip /tmp/files.zip -d /workspace && echo \"%s\" > /workspace/Dockerfile", encodedZipData, DOCKERFILE),
+								},
 								VolumeMounts: []corev1.VolumeMount{
 									{
 										Name:      "workspace-volume",
@@ -188,15 +193,13 @@ func main() {
 									Privileged: &buildkitPrivileged,
 								},
 								ImagePullPolicy: corev1.PullIfNotPresent,
-								Command:         []string{"buildctl-daemonless.sh"},
-								// Command: []string{"sh", "-c", "sleep infinity"}, //UNCOMMENT TO ENABLE DEBUG (with kubectl exec -it <pod name> -- sh)
+								Command:         []string{"sh", "-c"},
 								Args: []string{
-									"build",
-									"--frontend", "dockerfile.v0",
-									"--local", "context=/workspace",
-									"--local", "dockerfile=/workspace",
-									"--output", fmt.Sprintf("type=image,name=registry.default.svc.cluster.local:5000/assignment:%s,push=true,registry.insecure=true", assignment), //setup registry:2 as k8s service
-
+									fmt.Sprintf(
+										"printf '%%s' \"%s\" > /etc/buildkit/buildkitd.toml && exec buildctl-daemonless.sh build --frontend dockerfile.v0 --local context=/workspace --local dockerfile=/workspace --output type=image,name=registry.default.svc.cluster.local:5000/assignment:%s,push=true",
+										BUILDKIT_CONFIG,
+										assignment,
+									),
 								},
 								Env: []corev1.EnvVar{
 									{
