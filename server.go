@@ -66,7 +66,7 @@ func main() {
 			http.Error(w, "Only GET method allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		fmt.Fprintln(w, "(.0.2.6) Job Server is running. Send POST requests to /submit")
+		fmt.Fprintln(w, "(.0.2.8) Job Server is running. Send POST requests to /submit")
 	})
 
 	http.HandleFunc("/submit", func(w http.ResponseWriter, r *http.Request) {
@@ -287,6 +287,83 @@ func main() {
 			"jobName": buildJobName,
 			"status":  "created",
 		})
+
+	})
+
+	http.HandleFunc("/results", func(w http.ResponseWriter, r *http.Request) {
+
+		if r.Method != http.MethodGet {
+			http.Error(w, "Only GET method allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		assignment := strings.ToLower(r.URL.Query().Get("assignment"))
+		if assignment == "" {
+			http.Error(w, "Missing 'assignment' field", http.StatusBadRequest)
+			return
+		}
+		student := strings.ToLower(r.URL.Query().Get("student"))
+		if student == "" {
+			http.Error(w, "Missing 'student' field", http.StatusBadRequest)
+			return
+		}
+
+		jobName := fmt.Sprintf("autograde-%s-%s", student, assignment)
+
+		job, err := clientset.BatchV1().Jobs("default").Get(context.TODO(), jobName, meta.GetOptions{})
+		if err != nil {
+			http.Error(w, "job not found: "+err.Error(), http.StatusNotFound)
+			return
+		}
+
+		// Check completion
+		if job.Status.Succeeded == 0 && job.Status.Failed == 0 {
+			// Not completed yet
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"jobName": jobName,
+				"status":  "running",
+				"active":  job.Status.Active,
+			})
+			return
+		}
+		if job.Status.Failed > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"jobName": jobName,
+				"status":  "failed",
+			})
+			return
+		}
+
+		// Get pod name
+		pods, err := clientset.CoreV1().Pods("default").List(context.TODO(), meta.ListOptions{
+			LabelSelector: "job-name=" + jobName,
+		})
+		if err != nil || len(pods.Items) == 0 {
+			http.Error(w, "no pods for job", http.StatusNotFound)
+			return
+		}
+		podName := pods.Items[0].Name
+
+		// Retrieve logs from autograder container
+		logsReq := clientset.CoreV1().Pods("default").GetLogs(podName, &corev1.PodLogOptions{
+			Container: "autograder",
+		})
+		stream, err := logsReq.Stream(context.TODO())
+		if err != nil {
+			http.Error(w, "failed to get logs: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer stream.Close()
+
+		data, err := io.ReadAll(stream)
+		if err != nil {
+			http.Error(w, "failed to read logs: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(data)
 
 	})
 
