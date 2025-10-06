@@ -21,18 +21,16 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// FROM registry.default.svc.cluster.local:5000/autograder-base:ubuntu-22.04
 const DOCKERFILE = `
 FROM registry.default.svc.cluster.local:5000/autograder-base:ubuntu-22.04
-COPY setup.sh /autograder/source/
-COPY run_autograder /autograder/source/
+COPY . /autograder/source/
 COPY run_autograder /autograder/
 RUN chmod +x /autograder/run_autograder
 RUN chmod +x /autograder/source/setup.sh
 RUN bash /autograder/source/setup.sh
 `
 const BUILDKIT_CONFIG = `[registry.\"registry.default.svc.cluster.local:5000\"]
-  http=true
+    http=true
 `
 
 func main() {
@@ -59,6 +57,8 @@ func main() {
 		log.Fatalf("Failed to create Kubernetes Client: %v", err)
 	}
 
+	const registryIP = "192.168.49.2" //TODO: 1 Node needs to have static IP to hardcode (or find another solution)
+
 	// ---- Handlers ----
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +66,7 @@ func main() {
 			http.Error(w, "Only GET method allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		fmt.Fprintln(w, "(.0.2.4) Job Server is running. Send POST requests to /submit")
+		fmt.Fprintln(w, "(.0.2.6) Job Server is running. Send POST requests to /submit")
 	})
 
 	http.HandleFunc("/submit", func(w http.ResponseWriter, r *http.Request) {
@@ -75,6 +75,104 @@ func main() {
 			http.Error(w, "Only POST method allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
+		if err := r.ParseMultipartForm(10 << 20); err != nil {
+			http.Error(w, "failed to parse form: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		assignment := strings.ToLower(r.FormValue("assignment"))
+		if assignment == "" {
+			http.Error(w, "Missing 'assignment' field", http.StatusBadRequest)
+			return
+		}
+
+		student := strings.ToLower(r.FormValue("student"))
+		if student == "" {
+			http.Error(w, "Missing 'student' field", http.StatusBadRequest)
+			return
+		}
+
+		submission, _, err := r.FormFile("submission")
+		if err != nil {
+			http.Error(w, "missing submission", http.StatusBadRequest)
+			return
+		}
+		defer submission.Close()
+		submissionData, err := io.ReadAll(submission)
+		encodedSubmissionData := base64.StdEncoding.EncodeToString(submissionData)
+
+		//Create job to grade assignment
+		runnerClient := clientset.BatchV1().Jobs("default")
+		runnerName := fmt.Sprintf("autograde-%s-%s", student, assignment)
+		runnerJob_ttl := int32(60) //Keep runner job for 1 minute after completion
+
+		runnerJob := &batchv1.Job{
+			ObjectMeta: meta.ObjectMeta{
+				Name: runnerName,
+			},
+			Spec: batchv1.JobSpec{
+				TTLSecondsAfterFinished: &runnerJob_ttl,
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						RestartPolicy: corev1.RestartPolicyOnFailure,
+						Volumes: []corev1.Volume{
+							{
+								Name: "workspace-volume",
+								VolumeSource: corev1.VolumeSource{
+									EmptyDir: &corev1.EmptyDirVolumeSource{},
+								},
+							},
+						},
+						InitContainers: []corev1.Container{
+							{
+								Name:            "autograder-setup",
+								Image:           "alpine/git",
+								ImagePullPolicy: corev1.PullIfNotPresent,
+								Command:         []string{"/bin/sh", "-c"},
+								Args: []string{
+									fmt.Sprintf("mkdir -p /autograder/submission /autograder/results && echo \"%s\" | base64 -d > /tmp/files.zip && unzip /tmp/files.zip -d /autograder/submission && touch /autograder/results/results.json", encodedSubmissionData),
+								},
+								VolumeMounts: []corev1.VolumeMount{
+									{
+										Name:      "workspace-volume",
+										MountPath: "/autograder",
+									},
+								},
+							},
+						},
+						Containers: []corev1.Container{
+							{
+								Name:            "autograder",
+								Image:           fmt.Sprintf("%s:31804/assignment:%s", registryIP, assignment),
+								ImagePullPolicy: corev1.PullIfNotPresent,
+								Command:         []string{"sh", "-c"},
+								// Args:            []string{"sleep infinity"}, //Debug with kubectl exec -it <pod-name> -- sh
+								Args: []string{"cp -r /submission/. /autograder && /autograder/run_autograder >/dev/null 2>&1 && cat /autograder/results/results.json"},
+								VolumeMounts: []corev1.VolumeMount{
+									{
+										Name:      "workspace-volume",
+										MountPath: "/submission",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+
+		_, err = runnerClient.Create(context.TODO(), runnerJob, meta.CreateOptions{})
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to create runner Job: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"jobName": runnerName,
+			"status":  "created",
+		})
 
 	})
 
@@ -102,48 +200,6 @@ func main() {
 		defer zipFile.Close()
 		zipData, err := io.ReadAll(zipFile)
 		encodedZipData := base64.StdEncoding.EncodeToString(zipData)
-
-		// ag_script, _, err := r.FormFile("run_autograder")
-		// if err != nil {
-		// 	http.Error(w, "missing required script: run_autograder", http.StatusBadRequest)
-		// 	return
-		// }
-		// defer ag_script.Close()
-
-		// autograderData, err := io.ReadAll(ag_script)
-		// if err != nil {
-		// 	http.Error(w, "Failed to read run_autograder", http.StatusInternalServerError)
-		// 	return
-		// }
-
-		// setup_script, _, err := r.FormFile("setup")
-		// if err != nil {
-		// 	http.Error(w, "missing required script: setup.sh", http.StatusBadRequest)
-		// 	return
-		// }
-		// setupData, err := io.ReadAll(setup_script)
-		// if err != nil {
-		// 	http.Error(w, "Failed to read setup.sh", http.StatusInternalServerError)
-		// 	return
-		// }
-
-		// //Create ConfigMap for scripts (setup.sh and run_autograder)
-		// configMapName := "script-cm-" + assignment + fmt.Sprintf("-%d", time.Now().Unix())
-
-		// _, err = clientset.CoreV1().ConfigMaps("default").Create(context.TODO(), &corev1.ConfigMap{
-		// 	ObjectMeta: meta.ObjectMeta{
-		// 		Name: configMapName,
-		// 	},
-		// 	Data: map[string]string{
-		// 		"setup.sh":       string(setupData),
-		// 		"run_autograder": string(autograderData),
-		// 		"Dockerfile":     DOCKERFILE,
-		// 	},
-		// }, meta.CreateOptions{})
-		// if err != nil {
-		// 	http.Error(w, fmt.Sprintf("Failed to create ConfigMap: %v", err), http.StatusInternalServerError)
-		// 	return
-		// }
 
 		//Create job to create assignment image
 		buildkitPrivileged := true
