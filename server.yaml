@@ -15,7 +15,7 @@ spec:
       serviceAccountName: job-server-sa
       containers:
         - name: server
-          image: go-server:latest
+          image: arunant/job-server:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5000
@@ -102,11 +102,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: go-server
+  name: registry
 spec:
   type: NodePort
   selector:
-    app: go-server
+    app: registry
   ports:
     - port: 5000
       targetPort: 5000
